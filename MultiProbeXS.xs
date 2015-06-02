@@ -3,10 +3,13 @@
 #include "XSUB.h"
 #include "ppport.h"
 
+#include "mpchash.h"
+
 MODULE = Algorithm::ConsistentHash::MultiProbeXS PACKAGE = Algorithm::ConsistentHash::MultiProbeXS
 
 TYPEMAP: <<HERE
-struct chash_t *	O_OBJECT
+struct mpchash_t *	O_OBJECT
+uint64_t	T_UV
 
 OUTPUT
 
@@ -23,78 +26,42 @@ O_OBJECT
 HERE
 
 
-### new({ids => [key1, key2, key3], replicas => 123})
-
-struct chash_t *
-new(CLASS, ...)
+struct mpchash_t *
+new(CLASS, AV *node_names, size_t k, uint64_t seed1, uint64_t seed2)
     char *CLASS
   PREINIT:
-    HV *params;
-    I32 i;
+    char **node_names_str;
+    size_t *name_lens;
+    size_t num_names;
     SV **svp;
-    AV *ids;
-    size_t replicas;
-    const char **keys;
-    size_t *lens;
-    size_t nkeys;
-    SV *keys_guard;
-    SV *lens_guard;
+    size_t i;
+    size_t total_len = 0;
+    STRLEN len;
   CODE:
-    if ( (items-1) % 2 )
-      croak("Even number of parameters expected!");
+    /* FIXME the memory management using the mortal stack is quite inefficient. */
+    num_names = (size_t)(av_len(node_names)+1);
 
-    params = (HV *)sv_2mortal( (SV*)newHV() );
-    for (i = 1; i < items; i += 2) {
-      SV *keyname = ST(i);
-      SV *value   = ST(i+1);
-      SvREFCNT_inc(value); /* hv_store_ent acquires a refcount ownership */
-      hv_store_ent(params, keyname, value, 0);
+    name_lens = (size_t *)malloc(sizeof(size_t) * num_names);
+    if (!name_lens) croak("Out of memory");
+
+    node_names_str = (char **)malloc(sizeof(char *) * num_names);
+    if (!node_names_str) {
+      free(name_lens);
+      croak("Out of memory");
     }
 
-    /* Find the ids part */
-    svp = hv_fetchs(params, "ids", 0);
-    if (!svp || !SvROK(*svp) || SvTYPE(SvRV(*svp)) != SVt_PVAV)
-      croak("Expected an 'ids' parameter that is an array reference");
-
-    ids = (AV *)SvRV(*svp);
-
-    /* Now find replicas */
-    svp = hv_fetchs(params, "replicas", 0);
-    if (!svp)
-      croak("Expected an 'replicas' parameter");
-
-    replicas = SvIV(*svp);
-    if (replicas == 0)
-      croak("Cannot work with zero replicas!");
-
-    nkeys = av_len(ids)+1;
-
-    /* Allocate memory in an exception-safe manner */
-    keys_guard = sv_2mortal( newSV( nkeys * sizeof(char *) ) );
-    keys = (const char **)SvPVX(keys_guard);
-
-    lens_guard = sv_2mortal( newSV( nkeys * sizeof(size_t) ) );
-    lens = (size_t *)SvPVX(lens_guard);
-
-    for (i = 0; i < nkeys; ++i) {
-      char *k;
-      STRLEN len;
-
-      svp = av_fetch(ids, i, 0);
-      if (svp == NULL) {
-        /* this is wrong */
-        len = 0;
-        k = NULL;
-      }
-      else {
-        k = SvPVbyte(*svp, len); /* FIXME is this correct for UTF8? */
-      }
-
-      keys[i] = k;
-      lens[i] = len;
+    for (i = 0; i < num_names; ++i) {
+      svp = av_fetch(node_names, i, 0);
+      if (!svp)
+        croak("Invalid node name supplied at index %i", (IV)i);
+      node_names_str[i] = SvPV(*svp, len);
+      name_lens[i] = (size_t)len;
     }
+    
+    RETVAL = mpchash_create((const char **)node_names_str, name_lens, num_names, k, seed1, seed2);
 
-    RETVAL = chash_create(keys, lens, nkeys, replicas);
+    free(name_lens);
+    free(node_names_str);
 
     if (RETVAL == NULL)
       croak("Unknown error");
@@ -103,13 +70,13 @@ new(CLASS, ...)
 
 void
 DESTROY(self)
-    struct chash_t *self
+    struct mpchash_t *self
   CODE:
-    chash_free(self);
+    mpchash_free(self);
 
 SV *
 lookup(self, key)
-    struct chash_t *self
+    struct mpchash_t *self
     SV *key;
   PREINIT:
     const char *out_str;
@@ -118,7 +85,7 @@ lookup(self, key)
     STRLEN key_len;
   CODE:
     key_str = SvPVbyte(key, key_len);
-    chash_lookup(self, key_str, key_len, &out_str, &out_str_len);
+    mpchash_lookup(self, key_str, key_len, &out_str, &out_str_len);
     RETVAL = newSVpvn(out_str, out_str_len);
   OUTPUT: RETVAL
 
